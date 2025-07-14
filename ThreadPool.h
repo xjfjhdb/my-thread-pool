@@ -1,4 +1,5 @@
-// ThreadPool.h 完整修复代码
+#ifndef THREAD_POOL_H
+#define THREAD_POOL_H
 
 #include <vector>
 #include <queue>
@@ -14,6 +15,7 @@
 #include <chrono>
 #include <algorithm>
 #include <iostream>
+#include <utility>
 
 class ThreadPool {
 public:
@@ -83,11 +85,13 @@ inline ThreadPool::ThreadPool(size_t min_threads, size_t max_threads)
         add_worker();
     }
     
-    // 启动线程调整器（200ms检查一次）
+    // 启动线程调整器
     adjust_thread = std::thread([this] {
         while (!stop.load()) {
             std::this_thread::sleep_for(std::chrono::milliseconds(200));
-            if (!stop.load()) adjust_workers();
+            if (!stop.load()) {
+                adjust_workers();
+            }
         }
     });
 }
@@ -99,7 +103,7 @@ inline void ThreadPool::add_worker() {
 }
 
 inline void ThreadPool::worker_loop(Worker* worker) {
-    while (!worker->should_stop.load()) {
+    while (true) {
         TaskItem task_item;
         bool has_task = false;
         
@@ -109,7 +113,8 @@ inline void ThreadPool::worker_loop(Worker* worker) {
                 return stop.load() || worker->should_stop.load() || !tasks.empty();
             });
             
-            if (worker->should_stop.load() || stop.load()) {
+            // 检查是否应该退出
+            if (stop.load() || worker->should_stop.load()) {
                 return;
             }
             
@@ -144,7 +149,9 @@ inline void ThreadPool::worker_loop(Worker* worker) {
                     task_thread.detach();
                 }
             } else {
-                if (task_thread.joinable()) task_thread.join();
+                if (task_thread.joinable()) {
+                    task_thread.join();
+                }
             }
             
             auto end = std::chrono::high_resolution_clock::now();
@@ -159,7 +166,7 @@ inline void ThreadPool::adjust_workers() {
     std::unique_lock<std::mutex> lock(queue_mutex);
     if (stop.load()) return;
     
-    // 激进扩容策略：队列长度/2 + 4
+    // 计算理想线程数
     size_t ideal_threads = std::min(tasks.size() / 2 + 4, max_threads_);
     ideal_threads = std::clamp(ideal_threads, min_threads_, max_threads_);
     
@@ -237,9 +244,15 @@ inline ThreadPool::Stats ThreadPool::get_stats() const {
 }
 
 inline ThreadPool::~ThreadPool() {
+    // 1. 设置停止标志
     stop.store(true);
     
-    // 标记所有工作线程停止
+    // 2. 停止调整线程
+    if (adjust_thread.joinable()) {
+        adjust_thread.join();
+    }
+    
+    // 3. 标记所有工作线程停止
     {
         std::lock_guard<std::mutex> lock(queue_mutex);
         for (auto& worker : workers) {
@@ -247,18 +260,22 @@ inline ThreadPool::~ThreadPool() {
         }
     }
     
+    // 4. 唤醒所有等待线程
     condition.notify_all();
     
-    // 等待所有工作线程结束
+    // 5. 等待所有工作线程结束
     for (auto& worker : workers) {
         if (worker->thread.joinable()) {
             worker->thread.join();
         }
     }
     
-    if (adjust_thread.joinable()) adjust_thread.join();
-    
-    // 清空任务队列
+    // 6. 清空任务队列
     std::priority_queue<TaskItem> empty;
     std::swap(tasks, empty);
+    
+    // 7. 清除工作线程容器
+    workers.clear();
 }
+
+#endif
